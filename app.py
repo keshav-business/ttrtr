@@ -1,0 +1,672 @@
+import os
+from fastapi import FastAPI, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
+import cv2
+import numpy as np
+import speech_recognition as sr
+import requests
+import json
+from PIL import Image
+import pytesseract
+import asyncio
+import base64
+import logging
+import re
+from typing import Optional, Tuple
+from dotenv import load_dotenv
+import json
+from datetime import datetime
+from typing import Dict, List, Optional
+import os
+
+# LangChain imports
+from langchain.document_loaders import PyPDFLoader
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.vectorstores import FAISS
+from langchain.chains import RetrievalQA
+from langchain.llms import OpenAI
+from meeting_report_emailer import MeetingReportEmailer
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+# Load environment variables
+load_dotenv()
+
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+PDF_FOLDER = os.getenv('PDF_FOLDER', 'data/datamn')
+if not OPENAI_API_KEY:
+    logger.error("OpenAI API key not found in environment variables!")
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# Initialize face detection
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
+# Initialize speech recognition
+recognizer = sr.Recognizer()
+
+# Initialize LangChain components
+qa_chain = None
+try:
+    # Load PDF documents
+    loaders = [PyPDFLoader(os.path.join(PDF_FOLDER, fn)) 
+              for fn in os.listdir(PDF_FOLDER) if fn.endswith('.pdf')]
+    docs = []
+    for loader in loaders:
+        docs.extend(loader.load())
+    
+    # Split documents
+    text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+    texts = text_splitter.split_documents(docs)
+    
+    # Create embeddings and vector store
+    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+    vectorstore = FAISS.from_documents(texts, embeddings)
+    
+    # Create QA chain
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=OpenAI(openai_api_key=OPENAI_API_KEY),
+        chain_type="stuff",
+        retriever=vectorstore.as_retriever()
+    )
+    logger.info("LangChain QA chain initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize QA chain: {str(e)}")
+    qa_chain = None
+
+
+from langchain.prompts import PromptTemplate
+
+# Custom prompt template
+template = """You are a helpful AI assistant with access to knowledge about UBIK and subsidiaries. 
+Answer questions based on the provided context. If you don't know something or if it's not in the context, 
+say that you aren't trained for it. Also, don't go out of context. Your name is UBIK AI. Answer mostly under 50 words unless very much required.
+
+Context: {context}
+Question: {question}
+Helpful Answer:"""
+
+QA_PROMPT = PromptTemplate(
+    template=template, input_variables=["context", "question"]
+)
+
+# Create QA chain with source documents tracking
+qa_chain = RetrievalQA.from_chain_type(
+    llm=OpenAI(openai_api_key=OPENAI_API_KEY, temperature=0),
+    chain_type="stuff",
+    retriever=vectorstore.as_retriever(),
+    return_source_documents=True,
+    chain_type_kwargs={"prompt": QA_PROMPT}
+)
+# Track detection states
+face_detected = False
+card_detected = False
+
+
+# Card stream URL from environment variable
+CARD_STREAM_URL = os.getenv('CARD_STREAM_URL', 'rtsp://192.168.1.67:1935/')
+
+class MeetingTracker:
+    def __init__(self, storage_dir: str = "meeting_logs"):
+        self.storage_dir = storage_dir
+        self.current_meeting = {
+            "start_time": None,
+            "end_time": None,
+            "participant_name": None,
+            "participant_email": "NA",
+            "participant_phone": "NA",
+            "participant_company": "NA",
+            "questions": [],
+            "responses": [],
+            "topics_discussed": set()
+        }
+        
+        if not os.path.exists(storage_dir):
+            os.makedirs(storage_dir)
+
+    def start_meeting(self, participant_name: Optional[str] = None):
+        """Start a new meeting session"""
+        self.current_meeting["start_time"] = datetime.now().isoformat()
+        self.current_meeting["participant_name"] = participant_name
+        self.current_meeting["questions"] = []
+        self.current_meeting["responses"] = []
+        self.current_meeting["topics_discussed"] = set()
+
+    def update_contact_info(self, email: str, phone: str, company: str):
+        """Update participant contact information"""
+        self.current_meeting["participant_email"] = email
+        self.current_meeting["participant_phone"] = phone
+        self.current_meeting["participant_company"] = company
+
+    def _save_meeting_log(self, summary: Dict) -> str:
+        """Save meeting summary to a file with contact information"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        participant = self.current_meeting["participant_name"] or "anonymous"
+        filename = f"{self.storage_dir}/meeting_{participant}_{timestamp}.txt"
+        
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write("=== Meeting Summary ===\n\n")
+            f.write(f"Date: {summary['meeting_date']}\n")
+            f.write(f"Time: {summary['start_time']} - {summary['end_time']}\n")
+            f.write(f"Duration: {summary['duration_minutes']:.1f} minutes\n")
+            f.write(f"Participant: {summary['participant_name']}\n")
+            f.write(f"Email: {self.current_meeting['participant_email']}\n")
+            f.write(f"Phone: {self.current_meeting['participant_phone']}\n")
+            f.write(f"Company: {self.current_meeting['participant_company']}\n")
+            f.write(f"Total Questions Asked: {summary['total_questions']}\n\n")
+            
+            f.write("=== Discussion Topics ===\n")
+            f.write(", ".join(summary['main_topics']))
+            f.write("\n\n=== Questions and Responses ===\n\n")
+            
+            for i, qa in enumerate(summary['questions_and_responses'], 1):
+                f.write(f"Q{i}: {qa['Q']}\n")
+                f.write(f"A{i}: {qa['A']}\n\n")
+        
+        return filename
+
+    def add_interaction(self, question: str, response: str):
+        """Record a Q&A interaction"""
+        self.current_meeting["questions"].append(question)
+        self.current_meeting["responses"].append(response)
+        
+        # Extract potential topics from question and response
+        # This is a simple implementation - could be enhanced with NLP
+        words = set((question + " " + response).lower().split())
+        self.current_meeting["topics_discussed"].update(words)
+
+    def end_meeting(self) -> str:
+        """End the meeting and save the summary"""
+        if not self.current_meeting["start_time"]:
+            return "No active meeting to end"
+
+        self.current_meeting["end_time"] = datetime.now().isoformat()
+        
+        # Generate summary
+        summary = self._generate_summary()
+        
+        # Save to file
+        filename = self._save_meeting_log(summary)
+        
+        # Reset current meeting
+        self.current_meeting = {
+            "start_time": None,
+            "end_time": None,
+            "participant_name": None,
+            "questions": [],
+            "responses": [],
+            "topics_discussed": set()
+        }
+        
+        return filename
+
+    def _generate_summary(self) -> Dict:
+        """Generate a meeting summary"""
+        start_time = datetime.fromisoformat(self.current_meeting["start_time"])
+        end_time = datetime.fromisoformat(self.current_meeting["end_time"])
+        duration = end_time - start_time
+        
+        summary = {
+            "meeting_date": start_time.strftime("%Y-%m-%d"),
+            "start_time": start_time.strftime("%H:%M:%S"),
+            "end_time": end_time.strftime("%H:%M:%S"),
+            "duration_minutes": duration.total_seconds() / 60,
+            "participant_name": self.current_meeting["participant_name"],
+            "total_questions": len(self.current_meeting["questions"]),
+            "questions_and_responses": [
+                {"Q": q, "A": r} for q, r in zip(
+                    self.current_meeting["questions"],
+                    self.current_meeting["responses"]
+                )
+            ],
+            "main_topics": list(self.current_meeting["topics_discussed"]),
+        }
+        
+        return summary
+
+    
+
+async def get_ai_response(text: str, name: Optional[str] = None) -> str:
+    """Get response using PDF content and extract contact information"""
+    if not qa_chain:
+        return "System is not ready. Please try again later."
+    
+    try:
+        # First, extract contact information using GPT
+        contact_prompt = (
+            "Extract email, phone number, and company name from the following text. "
+            "Respond in JSON format with keys 'email', 'phone', 'company'. "
+            "Use 'NA' if information is not found.\n\n"
+            f"Text: {text}"
+        )
+        
+        contact_response = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: requests.post(
+                'https://api.openai.com/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {OPENAI_API_KEY}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'model': 'gpt-3.5-turbo',
+                    'messages': [{'role': 'user', 'content': contact_prompt}],
+                    'temperature': 0.1
+                }
+            )
+        )
+        
+        contact_info = contact_response.json()['choices'][0]['message']['content']
+        contact_data = json.loads(contact_info)
+        
+        # Store contact information
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        contact_filename = f"contact_logs/contact_{timestamp}.txt"
+        
+        # Ensure directory exists
+        os.makedirs("contact_logs", exist_ok=True)
+        
+        # Save contact information
+        with open(contact_filename, 'w') as f:
+            f.write(f"Timestamp: {timestamp}\n")
+            f.write(f"Name: {name if name else 'NA'}\n")
+            f.write(f"Email: {contact_data.get('email', 'NA')}\n")
+            f.write(f"Phone: {contact_data.get('phone', 'NA')}\n")
+            f.write(f"Company: {contact_data.get('company', 'NA')}\n")
+            f.write(f"Original Text: {text}\n")
+
+        # Get response from QA chain
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: qa_chain({"query": text})
+        )
+        
+        if not result.get('source_documents'):
+            return "I can only answer questions about Metaverse 911 and its services from the provided documents."
+            
+        response = result['result'].strip()
+        
+        if name:
+            response = f"{name}, {response}"
+            
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error getting AI response: {str(e)}")
+        return "Error processing your question. Please try again."
+    
+face_detected = False
+card_detected = False
+
+# Card stream URL from environment variable
+CARD_STREAM_URL = os.getenv('CARD_STREAM_URL', 'rtsp://192.168.1.67:1935/')
+
+
+async def validate_contact_info(text: str) -> Tuple[bool, Optional[Dict]]:
+    """
+    Validate if the text contains a valid name and extract contact information using AI.
+    Returns (is_valid, contact_info_dict)
+    """
+    logger.info(f"Attempting to validate text and extract contact info: {text!r}")
+    
+    try:
+        # Prepare the prompt for the AI to extract all contact information
+        prompt = (
+            "Extract name and contact information from the text. If a piece of information "
+            "is not found, use 'NA'. Respond in this exact JSON format:\n"
+            "{\n"
+            "  'is_valid': true/false,\n"
+            "  'name': 'extracted name or NA',\n"
+            "  'email': 'email or NA',\n"
+            "  'phone': 'phone number or NA',\n"
+            "  'company': 'company name or NA'\n"
+            "}\n\n"
+            f"Text to analyze: {text}"
+        )
+        
+        logger.debug(f"Sending prompt to OpenAI: {prompt}")
+        
+        # Call OpenAI API
+        response = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: requests.post(
+                'https://api.openai.com/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {OPENAI_API_KEY}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'model': 'gpt-3.5-turbo',
+                    'messages': [{'role': 'user', 'content': prompt}],
+                    'temperature': 0.1
+                },
+                timeout=5
+            )
+        )
+        response.raise_for_status()
+        
+        # Extract AI's response
+        ai_response = response.json()['choices'][0]['message']['content'].strip()
+        logger.info(f"AI response: {ai_response!r}")
+        
+        # Parse the JSON response
+        contact_info = json.loads(ai_response)
+        
+        # Log the extracted information
+        logger.info(f"Extracted contact info: {contact_info}")
+        
+        return contact_info['is_valid'], contact_info
+        
+    except Exception as e:
+        logger.error(f"Error in AI contact info validation: {str(e)}")
+        return False, None
+
+# Modified check_card_stream function to use the new validate_contact_info
+async def check_card_stream():
+    """Check RTSP stream for card with valid contact info, returns contact info dict or None"""
+    logger.info("Starting card stream check")
+    
+    card_stream = await init_card_stream()
+    if not card_stream:
+        logger.error("Failed to initialize card stream")
+        raise Exception("Unable to access card stream")
+
+    start_time = asyncio.get_event_loop().time()
+    timeout = 3  # seconds
+    frame_count = 0
+
+    try:
+        while (asyncio.get_event_loop().time() - start_time) < timeout:
+            logger.debug("Attempting to read frame from card stream")
+            ret, frame = await asyncio.get_event_loop().run_in_executor(
+                None, card_stream.read
+            )
+            
+            if not ret:
+                logger.warning("Failed to read frame from card stream")
+                await asyncio.sleep(1)
+                continue
+
+            frame_count += 1
+            logger.info(f"Successfully read frame {frame_count} from card stream")
+
+            try:
+                # Convert frame to bytes
+                success, encoded_frame = cv2.imencode('.jpg', frame)
+                if not success:
+                    continue
+                
+                # Process frame with Vision API
+                text = await process_image_with_vision_api(encoded_frame.tobytes())
+                logger.info(f"Card stream Vision API text from frame {frame_count}: {text!r}")
+                
+                if text:
+                    is_valid, contact_info = await validate_contact_info(text)
+                    if is_valid:
+                        logger.info(f"Valid contact info found in frame {frame_count}: {contact_info}")
+                        return contact_info
+            except Exception as e:
+                logger.error(f"Card processing error on frame {frame_count}: {str(e)}")
+            
+            await asyncio.sleep(1)
+        
+        logger.warning(f"Card stream check timed out after {frame_count} frames")
+        return None
+    finally:
+        logger.info("Releasing card stream")
+        card_stream.release()
+
+
+
+
+GOOGLE_VISION_API_KEY = os.getenv('GOOGLE_VISION_API_KEY')
+
+
+async def process_image_with_vision_api(image_bytes: bytes) -> str:
+    """
+    Process image using Google Cloud Vision API
+    """
+    try:
+        # Convert image to base64
+        image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+        
+        # Prepare the request payload
+        vision_api_url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}"
+        payload = {
+            "requests": [
+                {
+                    "image": {
+                        "content": image_b64
+                    },
+                    "features": [
+                        {
+                            "type": "TEXT_DETECTION"
+                        }
+                    ]
+                }
+            ]
+        }
+
+        # Make request to Vision API
+        response = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: requests.post(
+                vision_api_url,
+                json=payload,
+                headers={'Content-Type': 'application/json'}
+            )
+        )
+        response.raise_for_status()
+
+        # Extract text from response
+        result = response.json()
+        if 'responses' in result and result['responses']:
+            text_annotation = result['responses'][0].get('textAnnotations', [])
+            if text_annotation:
+                return text_annotation[0].get('description', '')
+        
+        return ''
+
+    except Exception as e:
+        logger.error(f"Error in Vision API processing: {str(e)}")
+        return ''
+
+
+async def init_card_stream():
+    try:
+        logger.info(f"Attempting to connect to RTSP stream at: {CARD_STREAM_URL}")
+        
+        # Try to create VideoCapture object
+        stream = cv2.VideoCapture(CARD_STREAM_URL, cv2.CAP_FFMPEG)
+        
+        # Log initial state
+        logger.info(f"Initial stream open status: {stream.isOpened()}")
+        
+        # Get and log stream properties
+        fps = stream.get(cv2.CAP_PROP_FPS)
+        frame_width = stream.get(cv2.CAP_PROP_FRAME_WIDTH)
+        frame_height = stream.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        logger.info(f"Stream properties - FPS: {fps}, Width: {frame_width}, Height: {frame_height}")
+        
+        # Set buffer size
+        stream.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        
+        # Test read a frame
+        ret, frame = stream.read()
+        if not ret:
+            logger.error("Failed to read first frame from stream")
+            return None
+        
+        if not stream.isOpened():
+            logger.error(f"Failed to open RTSP stream: {CARD_STREAM_URL}")
+            return None
+            
+        logger.info("Successfully connected to RTSP stream and read first frame")
+        return stream
+    except cv2.error as e:
+        logger.error(f"OpenCV error initializing stream: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Error initializing RTSP stream: {str(e)}")
+        logger.exception("Full exception traceback:")
+        return None
+
+
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    logger.info("WebSocket connection established")
+    
+    # Initialize state variables
+    current_contact_info = None
+    face_detected = False
+    card_task = None
+    
+    # Initialize meeting tracker and emailer
+    meeting_tracker = MeetingTracker()
+    emailer = MeetingReportEmailer()
+    meeting_tracker.start_meeting()
+    logger.info("Meeting tracking started")
+    
+    try:
+        while True:
+            data = await websocket.receive_text()
+            
+            if data.startswith('frame:'):
+                if not face_detected:
+                    # Process frame for face detection
+                    frame_data = data[6:]
+                    try:
+                        jpg_original = base64.b64decode(frame_data.split(',')[1])
+                        jpg_as_np = np.frombuffer(jpg_original, dtype=np.uint8)
+                        frame = cv2.imdecode(jpg_as_np, flags=1)
+                        
+                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+                        if len(faces) > 0:
+                            face_detected = True
+                            await websocket.send_text("face_detected")
+                            logger.info("Face detected, starting card detection")
+                            # Start card detection
+                            card_task = asyncio.create_task(check_card_stream())
+                    except Exception as e:
+                        logger.error(f"Frame processing error: {str(e)}")
+                        await websocket.send_text(f"error:Frame processing failed: {str(e)}")
+            
+            elif data.startswith('question:'):
+                question = data[9:]
+                
+                if not face_detected:
+                    response = "Please face the camera to start."
+                elif card_task and not card_task.done():
+                    response = "Please wait while we verify your card."
+                else:
+                    try:
+                        response = await get_ai_response(question, current_contact_info['name'] if current_contact_info else None)
+                        # Record the interaction in meeting tracker
+                        meeting_tracker.add_interaction(question, response)
+                        logger.debug(f"Recorded Q&A interaction - Q: {question}, A: {response}")
+                    except Exception as e:
+                        logger.error(f"Error getting AI response: {str(e)}")
+                        response = "I apologize, but I encountered an error processing your question. Please try again."
+                
+                await websocket.send_text(f"ai_response:{response}")
+            
+            elif data == "end_session":
+                logger.info("Session end requested by client")
+                break
+            
+            # Check card task completion
+            if card_task and card_task.done():
+                try:
+                    current_contact_info = card_task.result()
+                    if current_contact_info:
+                        # Update meeting tracker with all contact information
+                        meeting_tracker.current_meeting["participant_name"] = current_contact_info['name']
+                        meeting_tracker.update_contact_info(
+                            email=current_contact_info['email'],
+                            phone=current_contact_info['phone'],
+                            company=current_contact_info['company']
+                        )
+                        logger.info(f"Card detected, participant info: {current_contact_info}")
+                        
+                        # Prepare user-friendly message with contact details
+                        contact_message = {
+                            "name": current_contact_info['name'],
+                            "email": current_contact_info['email'],
+                            "phone": current_contact_info['phone'],
+                            "company": current_contact_info['company']
+                        }
+                        await websocket.send_text(f"card_detected:{json.dumps(contact_message)}")
+                        
+                        # Send welcome message with name
+                        welcome_message = f"Welcome {current_contact_info['name']}! How can I assist you today?"
+                        await websocket.send_text(f"ai_response:{welcome_message}")
+                    else:
+                        logger.warning("No card detected")
+                        await websocket.send_text("no_card_detected")
+                        await websocket.send_text("ai_response:I couldn't read your card properly. Please try showing it again.")
+                    card_task = None  # Reset task
+                except Exception as e:
+                    logger.error(f"Card detection failed: {str(e)}")
+                    await websocket.send_text("card_error:Card verification failed")
+                    await websocket.send_text("ai_response:There was an error reading your card. Please try again.")
+                    card_task = None
+    
+  
+    except Exception as e:
+        logger.error(f"WebSocket error: {str(e)}")
+    finally:
+        # End meeting and save log
+        try:
+            log_filename = meeting_tracker.end_meeting()
+            logger.info(f"Meeting log saved to: {log_filename}")
+            
+            # Get participant email from meeting data
+            participant_email = meeting_tracker.current_meeting.get("participant_email")
+            
+            # Send email if we have a valid email address
+            if participant_email and participant_email != "NA":
+                try:
+                    # Use the last component of the path as the filename
+                    base_filename = os.path.basename(log_filename)
+                    success = emailer.process_and_send_report(base_filename, participant_email)
+                    if success:
+                        logger.info(f"Meeting summary email sent to {participant_email}")
+                    else:
+                        logger.error("Failed to send meeting summary email")
+                except Exception as e:
+                    logger.error(f"Error sending meeting summary email: {str(e)}")
+            else:
+                logger.warning("No valid participant email available for sending report")
+                
+        except Exception as e:
+            logger.error(f"Error saving meeting log: {str(e)}")
+        
+        # Cancel any pending card detection task
+        if card_task and not card_task.done():
+            card_task.cancel()
+            
+        try:
+            await websocket.close()
+        except Exception as e:
+            logger.error(f"Error closing WebSocket: {str(e)}")
+        logger.info("WebSocket connection closed")
+
+if __name__ == "__main__":
+    import uvicorn
+    logger.info("Starting FastAPI server...")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
