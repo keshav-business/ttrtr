@@ -15,10 +15,8 @@ from fastapi import UploadFile
 from fastapi.responses import JSONResponse
 import subprocess
 import logging
-import random
-from typing import Dict, List
-import logging
-from datetime import datetime
+
+
 from fastapi import FastAPI, File, UploadFile, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -82,70 +80,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-PRODUCT_RESPONSES: Dict[str, List[str]] = {
-    "ethiglo": [
-        "Ethiglo is one of our premier skincare solutions",
-        "Let me tell you about our advanced Ethiglo formulation",
-        "Ethiglo represents our commitment to quality skincare",
-        "Our Ethiglo product line has been making waves",
-        "Speaking about Ethiglo's remarkable benefits"
-    ],
-    "derma": [
-        "Our Derma range is specially formulated",
-        "The Derma line represents cutting-edge skincare",
-        "Our Derma products are trusted by professionals",
-        "Looking at our innovative Derma range",
-        "Regarding our specialized Derma products"
-    ]
-    # Add more products as needed
-}
-
-# Emotion-based responses
-EMOTIONAL_RESPONSES = {
-    "urgent": [
-        "I understand this is urgent - let me explain about",
-        "Let me quickly tell you about",
-        "I'll immediately share the details about",
-        "Here's the urgent information about",
-        "Let me address your urgent query about"
-    ],
-    "frustrated": [
-        "I understand your concern - let me clarify about",
-        "I appreciate your patience - let me explain about",
-        "Let me help resolve your concerns about",
-        "I'll help you understand everything about",
-        "Let me address your concerns regarding"
-    ],
-    "curious": [
-        "That's an interesting question about",
-        "I'm excited to share information about",
-        "Let me explain the fascinating details of",
-        "You'll be interested to know about",
-        "Let me share what makes this special -"
-    ],
-    "technical": [
-        "Looking at the technical aspects,",
-        "From a technical perspective,",
-        "Analyzing the specifications,",
-        "Examining the technical details,",
-        "Regarding the technical features,"
-    ],
-    "comparison": [
-        "When comparing the options,",
-        "Looking at the differences,",
-        "Analyzing the various choices,",
-        "Examining the alternatives,",
-        "Comparing the features,"
-    ],
-    "price": [
-        "Regarding the pricing structure,",
-        "Looking at the cost aspects,",
-        "About the pricing details,",
-        "Concerning the investment value,",
-        "Speaking about the pricing,"
-    ]
-}
-
 def log_event(event_type: str, details: str = "", user_id: str = "Unknown"):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_line = f"{timestamp} | {event_type} | UserID: {user_id} | {details}\n"
@@ -206,6 +140,22 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 async def handle_speech_to_text(file: UploadFile):
+    """
+    Handle speech to text conversion using Google Cloud Speech-to-Text REST API.
+    Gets API key from environment variable GOOGLE_SPEECH_API_KEY.
+    
+    Args:
+        file (UploadFile): The uploaded audio file
+    """
+    # Get API key from environment variable
+    api_key = os.getenv('GOOGLE_API_KEY')
+    if not api_key:
+        logger.error("Missing GOOGLE_SPEECH_API_KEY environment variable")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Speech API key not configured"}
+        )
+
     logger.info(f"Starting speech to text conversion for file: {file.filename}")
     
     if file is None:
@@ -215,6 +165,48 @@ async def handle_speech_to_text(file: UploadFile):
             content={"error": "No file provided."}
         )
 
+    # Word hints for better recognition
+    word_hints = [
+    "Vitinext", "Vitabiz M", "TrichoExito Hair", "Benzonext",
+    "Tricholys", "DESONEXT", "Sisonext", "Roxinext",
+    "Resi V D3", "Ketonext AF", "Vizigly Plus",
+    "Hydrasun Moisturising Sunscreen", "For Mole & Warts",
+    "Fytocera", "Yorgain Protein", "Triolite",
+    "Ubispire Skin", "Hairvita Plus", "Aczee", "RetiK",
+    "M Zine", "Mupinext", "Floxanext", "Facemed",
+    "Ketonext CT", "O Wash", "Ethisun Sunscreen",
+    "For Psoriasis", "Cetylex", "Tricholys Intensive Grey Hair",
+    "Triolite Forte", "Ubispire S", "TrichoExito Nourishing",
+    "Benzonext C", "O Screen Gold", "Ethizine",
+    "Ethidox LB", "Epi", "Ketonext", "Nutraclin",
+    "Z Block Sunscreen", "Immunity", "Lipidz",
+    "Trichospire Deep Conditioning Hair", "Saligly Complexion",
+    "Ubispire", "Ubik Q 10", "Sebollic Salicylic Acid",
+    "Liftage", "Ethizine", "Bintreat", "Av Next",
+    "Epieff", "Glomed C", "UVMed Tinted Sunscreen",
+    "Lip Care", "Hydrofil", "Minosilk", "Kozilite H",
+    "Yorgain Protein", "TrichoExito Repair Keratin",
+    "Saligly Peeling", "Liftage Daily Collagen Beauty",
+    "Ethizine", "EpiEff Z", "Glutafine", "360 Block Sunscreen",
+    "Hydromax", "Trichospire Hair Growth", "Triolite TX",
+    "TrichoExito Minoxidil Topical", "Sebonia", "Instafil",
+    "Ethifex", "Epishine Plus", "Ethiglo", "AC Screen",
+    "Hydromax CT", "Minosilk Cafy", "Cuticans", "Sebogel Skin",
+    "Billacare", "Ciznext D", "Acmed", "Z Screen",
+    "Tricho", "Sefpil", "Epishine", "Hyalu",
+    "Trichospire F Hair", "Triolite", "Benzonext", "Cutishine",
+    "O Screen", "Hyalugel Plus", "Trichospire M Hair",
+    "Triolite", "Benzonext", "Chocolite",
+    "Ethiglo Plus", "BB Lite", "G Next", "Trichoz Plus",
+    "Lipzlite Lightening", "Caladew", "Buttermax", "Trichoz",
+    "O screen Gold", "Acmed Plus", "Z Stick", "Seren",
+    "Actreat", "CicaHydra", "Kozilite", "AquaDerm",
+    "Minosilk", "Kozilite", "DermaCare", "Kozimax",
+    "EpiHydra", "Halixir Hair", "HydraCalm", "FClin",
+    "SensiHydra", "Foligain Hair", "H Wash", "D Ride",
+    "Trichospire Vitamin", "Ethiglo ET", "Seren Hair",
+    "Dermashine", "A2Lite"
+]
     # Create data directory if it doesn't exist
     os.makedirs("data", exist_ok=True)
     
@@ -235,9 +227,9 @@ async def handle_speech_to_text(file: UploadFile):
         try:
             subprocess.run([
                 'ffmpeg', '-i', webm_path, 
-                '-acodec', 'pcm_s16le', 
-                '-ar', '16000', 
-                '-ac', '1', 
+                '-acodec', 'pcm_s16le',
+                '-ar', '16000',
+                '-ac', '1',
                 wav_path
             ], check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as e:
@@ -247,39 +239,66 @@ async def handle_speech_to_text(file: UploadFile):
                 content={"error": f"Audio conversion failed: {e.stderr}"}
             )
 
-        # Initialize speech recognizer
-        r = sr.Recognizer()
-        
-        # Process the audio file
-        with sr.AudioFile(wav_path) as source:
-            audio = r.record(source)  # Read the entire audio file
-            logger.debug("Processing audio with Google Speech Recognition...")
-            
-            try:
-                text = r.recognize_google(audio)
-                logger.info("Successfully transcribed audio")
-                return {"status": "success", "text": text}
-                
-            except sr.UnknownValueError:
-                logger.error("Google Speech Recognition could not understand audio")
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": "Could not understand audio"}
-                )
-            except sr.RequestError as e:
-                logger.error(f"Could not request results from Google SR service; {e}")
-                return JSONResponse(
-                    status_code=503,
-                    content={"error": f"Speech service error: {str(e)}"}
-                )
+        # Read the WAV file and encode to base64
+        with open(wav_path, "rb") as audio_file:
+            audio_content = base64.b64encode(audio_file.read()).decode('utf-8')
 
+        # Prepare the request payload
+        payload = {
+            "config": {
+                "encoding": "LINEAR16",
+                "sampleRateHertz": 16000,
+                "languageCode": "en-US",
+                "enableAutomaticPunctuation": True,
+                "speechContexts": [
+                    {"phrases": word_hints}
+                ]
+            },
+            "audio": {
+                "content": audio_content
+            }
+        }
+
+        # Google Cloud Speech-to-Text API endpoint
+        url = f"https://speech.googleapis.com/v1/speech:recognize?key={api_key}"
+
+        # Make the API request
+        logger.debug("Sending request to Google Cloud Speech-to-Text API...")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    
+                    # Extract transcriptions
+                    if "results" in result:
+                        transcript = " ".join(
+                            alternative["transcript"]
+                            for result in result["results"]
+                            for alternative in result["alternatives"]
+                        )
+                        logger.info("Successfully transcribed audio")
+                        return {"status": "success", "text": transcript}
+                    else:
+                        logger.error("No transcription results found")
+                        return JSONResponse(
+                            status_code=400,
+                            content={"error": "No transcription results found"}
+                        )
+                else:
+                    error_details = await response.text()
+                    logger.error(f"API request failed: {error_details}")
+                    return JSONResponse(
+                        status_code=response.status,
+                        content={"error": f"Speech service error: {error_details}"}
+                    )
+            
     except Exception as e:
         logger.exception("Unexpected error occurred")
         return JSONResponse(
             status_code=500,
             content={"error": f"An error occurred during transcription: {str(e)}"}
         )
-    
+        
     finally:
         # Clean up temporary files
         logger.debug("Cleaning up temporary files")
@@ -298,7 +317,8 @@ def initialize_global_vectorstore():
             os.path.join('data', "Ilesh Sir (IK) - Words.pdf"),
             os.path.join('data', "UBIK SOLUTION.pdf"),
             os.path.join('data', "illesh3.pdf"),
-            os.path.join('data', "website-data-ik.pdf")
+            os.path.join('data', "website-data-ik.pdf"),
+            os.path.join('data', "prods1.pdf")
         ]
 
         combined_text = ""
@@ -321,36 +341,6 @@ def initialize_global_vectorstore():
         )
         logger.info("Vectorstore has been created with OpenAI embeddings.")
     return True, "[SYSTEM MESSAGE] Vectorstore was created successfully."
-def detect_emotion(question: str) -> str:
-    question_lower = question.lower()
-    
-    # Emotion detection patterns
-    patterns = {
-        'urgent': ['urgent', 'asap', 'emergency', 'quick', 'fast', 'now'],
-        'frustrated': ['not working', 'problem', 'issue', 'wrong', 'bad', 'help', 'confused'],
-        'curious': ['why', 'how', 'what', 'curious', 'interested', 'tell me about', 'explain'],
-        'technical': ['spec', 'technical', 'configuration', 'setup', 'system', 'work', 'function'],
-        'comparison': ['compare', 'difference', 'better', 'versus', 'vs', 'or', 'which'],
-        'price': ['price', 'cost', 'expensive', 'cheap', 'discount', 'offer', 'worth']
-    }
-    
-    for emotion, keywords in patterns.items():
-        if any(word in question_lower for word in keywords):
-            return emotion
-    
-    return "curious"  # Default emotion
-
-def get_bridge_response(question: str) -> str:
-    question_lower = question.lower()
-    
-    # First check for specific products
-    for product, responses in PRODUCT_RESPONSES.items():
-        if product in question_lower:
-            return random.choice(responses)
-    
-    # If no product match, use emotion-based response
-    emotion = detect_emotion(question)
-    return random.choice(EMOTIONAL_RESPONSES[emotion])
 
 def handle_userinput(user_question: str, user_id: str):
     user_state = get_user_state(user_id)
@@ -358,31 +348,50 @@ def handle_userinput(user_question: str, user_id: str):
     if not conversation_chain:
         return None
 
-    # Get bridge response
-    bridge_response = get_bridge_response(user_question)
-    
-    # Create a prompt that instructs the AI to continue from the bridge response
-    modified_question = f"""
-    Continue this response seamlessly, providing accurate and detailed information:
-    "{bridge_response}"
-    
-    Original question: {user_question}
-    
-    Keep the tone consistent and expand on the information naturally.
-    """
-    
-    # Get AI response
-    ai_response = conversation_chain({'question': modified_question})['answer'].strip()
-    
-    # Combine responses seamlessly
-    final_response = f"{bridge_response} - {ai_response}"
+    # Step 1: Define the refinement template
+    def refine_input(input_text):
+        refinement_prompt = f"""
+        Based on the following user input: "{input_text}"
+        
+        
+        1. If it's a basic greeting:
+            - Respond: "Hello! How can I help you with information about UBIK Solutions?"
+        
+        2. For questions:
+            - Process them directly using available context
+            - Keep responses focused and concise
+        
+        Maintain a professional tone and avoid unnecessary elaboration.
+        
+        Refined query:
+        """
+        return conversation_chain({'question': refinement_prompt})['answer'].strip()
 
-    # Update history and logs
-    user_state['history'].append((user_question, final_response))
+    # Step 2: Generate the answer using the refined input
+    def generate_answer(refined_input):
+        answer_prompt = f"""
+        User's Refined Input: "{refined_input}"
+
+        Context: Respond to the user's query based on the refined input in a clear, concise, and contextually relevant manner.
+
+        Answer:
+        """
+        return conversation_chain({'question': answer_prompt})['answer'].strip()
+
+    # Step 3: Refine the user input
+    refined_question = refine_input(user_question)
+    log_event("RefinedInput", f"Refined Question: {refined_question}", user_id=user_id)
+
+    # Step 4: Generate the final answer
+    answer = generate_answer(refined_question)
+
+    # Step 5: Log events and update history
+    user_state['history'].append((user_question, answer))
+    log_event("PromptSentToGPT", f"Original Prompt: {user_question}, Refined: {refined_question}", user_id=user_id)
     log_event("UserQuestion", f"Q: {user_question}", user_id=user_id)
-    log_event("AIAnswer", f"A: {final_response}", user_id=user_id)
+    log_event("AIAnswer", f"A: {answer}", user_id=user_id)
 
-    return {'text': final_response}
+    return {'text': answer}
 
 def create_or_refresh_user_chain(user_id: str):
     user_state = get_user_state(user_id)
