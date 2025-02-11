@@ -52,9 +52,26 @@ CHUNK_OVERLAP = int(os.getenv('CHUNK_OVERLAP', 200))
 MODEL_NAME = os.getenv('MODEL_NAME', 'gpt-3.5-turbo')
 
 # Default system message
-DEFAULT_SYSTEM_MESSAGE = """You are a helpful AI assistant with access to knowledge about UBIK solutions and subsidaries. 
-with my prompt u will also receive the context regarding the question, answer based on that, if question isnt based on the context then say you are not trained to answer it , in a polite manner. you will answer the question that user will ask. you can respond to greetings or general greet things, Also, don't go out of context. Your name is UBIK AI. Answer mostly under 50 words unless very much required.
-there will be spelling errors, please consider them and give best response possible"""
+DEFAULT_SYSTEM_MESSAGE = """
+You are a helpful AI assistant named UBIK AI With access to knowledge about UBIK solutions and subsidaries.
+
+Guidelines:
+- Use semantic understanding to interpret questions with typos/spelling errors
+- Always refer to provided context to formulate answers
+- Keep responses clear and under 50 words unless more detail is needed
+- If question isn't in provided context, politely decline to answer
+- Do not discuss patient related information
+- do not go out of context
+- Stay focused, dont be irrelevant, focus on this
+- DONT BE IRRELEVANT
+- Can handle basic greetings
+- Stay strictly within the given context
+- If unclear, ask for clarification
+- U in ubik stands for utsav, I in ubik stands for illesh, B in ubik stands for Bhavani, K for khakhar
+Example:
+User: "Wat r companis ethix?"
+AI: Should understand this as "What are company's ethics?" and answer based on context
+"""
 
 logging.basicConfig(
     filename='app_logs.txt',
@@ -205,7 +222,7 @@ async def handle_speech_to_text(file: UploadFile):
     "EpiHydra", "Halixir Hair", "HydraCalm", "FClin",
     "SensiHydra", "Foligain Hair", "H Wash", "D Ride",
     "Trichospire Vitamin", "Ethiglo ET", "Seren Hair",
-    "Dermashine", "A2Lite"
+    "Dermashine", "A2Lite","Ubik", "Ethinext"
 ]
     # Create data directory if it doesn't exist
     os.makedirs("data", exist_ok=True)
@@ -251,7 +268,8 @@ async def handle_speech_to_text(file: UploadFile):
                 "languageCode": "en-US",
                 "enableAutomaticPunctuation": True,
                 "speechContexts": [
-                    {"phrases": word_hints}
+                    {"phrases": word_hints,
+                     "boost": 35}
                 ]
             },
             "audio": {
@@ -318,7 +336,9 @@ def initialize_global_vectorstore():
             os.path.join('data', "UBIK SOLUTION.pdf"),
             os.path.join('data', "illesh3.pdf"),
             os.path.join('data', "website-data-ik.pdf"),
-            os.path.join('data', "prods1.pdf")
+            os.path.join('data', "prods1.pdf"),
+            os.path.join('data', "summary.pdf")
+
         ]
 
         combined_text = ""
