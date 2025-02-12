@@ -121,7 +121,7 @@ def generate_unique_questions() -> List[str]:
         # Get relevant context once
         relevant_docs = quiz_storage.vector_store.similarity_search(
             "dermatology concepts treatment diagnosis pathology",
-            k=2  # Reduced number of documents
+            k=5 # Reduced number of documents
         )
         context = "\n\n".join([d.page_content for d in relevant_docs])
         
@@ -179,7 +179,7 @@ async def startup_event():
         
         # Initialize LLM with optimized settings
         llm = ChatOpenAI(
-            temperature=0.3,
+            temperature=0.7,
             model_name="gpt-3.5-turbo",
             openai_api_key=OPENAI_API_KEY
         )
@@ -189,7 +189,7 @@ async def startup_event():
             llm=llm,
             chain_type="stuff",  # Changed to simpler chain type
             retriever=quiz_storage.vector_store.as_retriever(
-                search_kwargs={"k": 2}  # Reduced number of documents
+                search_kwargs={"k":5} # Reduced number of documents
             ),
             verbose=False  # Disabled verbose logging
         )
