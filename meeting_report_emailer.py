@@ -179,7 +179,9 @@ class MeetingReportEmailer:
     def process_and_send_report(self, log_file: str) -> bool:
         """Process a meeting log file and send the report"""
         try:
-            log_path = Path(log_file)
+            log_path = Path(log_file).parent / 'meeting_logs' / Path(log_file).name
+            print("file received")
+            print(log_path)
             if not log_path.exists():
                 logger.error(f"Log file not found: {log_path}")
                 return False
